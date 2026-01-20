@@ -3,106 +3,112 @@ import pandas as pd
 import plotly.express as px
 import numpy as np
 
-st.set_page_config(layout="wide", page_title="Pile Load Visualization")
+# ตั้งค่าหน้าเว็บให้กว้างและดูสะอาดตา
+st.set_page_config(layout="wide", page_title="Pile Load Dashboard")
 
 st.title("🏗️ Pile Load & Ratio Visualization")
+st.markdown("---")
 
-# --- 1. Upload File ---
-uploaded_file = st.file_uploader("Upload ETABS Excel File", type=["xlsx"])
+# --- 1. อัปโหลดไฟล์ ---
+uploaded_file = st.file_uploader("อัปโหลดไฟล์ Excel จาก ETABS (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
-    # อ่านข้อมูลจาก Sheets ต่างๆ
     @st.cache_data
-    def load_data(file):
-        # ข้ามบรรทัดแรกที่เป็นชื่อตาราง และบรรทัดที่สองที่เป็นหน่วย (Units) ในบางไฟล์
+    def load_and_process(file):
+        # อ่าน Sheet ต่างๆ (ข้ามบรรทัดหัวตารางและหน่วย)
         df_forces = pd.read_excel(file, sheet_name="Element Forces - Columns", skiprows=[0, 2])
         df_conn = pd.read_excel(file, sheet_name="Column Object Connectivity", skiprows=[0, 2])
         df_points = pd.read_excel(file, sheet_name="Point Object Connectivity", skiprows=[0, 2])
         df_sect = pd.read_excel(file, sheet_name="Frame Assigns - Sect Prop", skiprows=[0, 2])
-        return df_forces, df_conn, df_points, df_sect
 
-    try:
-        df_forces, df_conn, df_points, df_sect = load_data(uploaded_file)
-        
-        # --- 2. Data Processing & Merging ---
-        # เชื่อม Column กับ Point (หาพิกัด X, Y ที่ Point J ซึ่งเป็นหัวเสา)
+        # เชื่อมข้อมูลหาพิกัด X, Y ที่หัวเสา (Point J)
         df_merged = df_conn.merge(df_points[['UniqueName', 'X', 'Y']], left_on='UniquePtJ', right_on='UniqueName')
         
         # เชื่อมกับ Section Property
-        df_merged = df_merged.merge(df_sect[['UniqueName', 'Section Property']], left_on='Unique Name', right_on='UniqueName', suffixes=('', '_sect'))
+        df_merged = df_merged.merge(df_sect[['UniqueName', 'Section Property']], 
+                                    left_on='Unique Name', right_on='UniqueName', suffixes=('', '_sect'))
         
-        # เชื่อมกับ Forces (ดึงโหลด P ที่หัวเสา: Station == Length)
-        # ปรับค่า Station และ Length ให้เป็นตัวเลขเพื่อความแม่นยำในการ Match
+        # เชื่อมกับ Forces (ดึงโหลด P ที่ Station ปลายเสา)
         df_forces['Station'] = pd.to_numeric(df_forces['Station'], errors='coerce')
         df_merged['Length'] = pd.to_numeric(df_merged['Length'], errors='coerce')
         
         df_final = df_merged.merge(df_forces, left_on=['Unique Name', 'Length'], right_on=['Unique Name', 'Station'])
         
-        # ค่าโหลด P (ติดลบคือ Compression) -> ใช้ค่าสัมบูรณ์ในการคิด Ratio
+        # จัดการค่าโหลด (ติดลบคือ Compression ให้ใช้ค่าบวกมาคิด Ratio)
         df_final['Load_P'] = df_final['P'].abs()
+        return df_final
+
+    try:
+        df_raw = load_and_process(uploaded_file)
         
-        # --- 3. Configuration Sidebar ---
-        st.sidebar.header("Settings")
+        # --- 2. ส่วนตั้งค่าที่ Sidebar ---
+        st.sidebar.header("🎨 การตั้งค่าเกณฑ์")
         
-        # กำหนด Safe Load สำหรับแต่ละหน้าตัด
-        unique_sections = df_final['Section Property'].unique()
+        # กำหนด Safe Load แยกตามหน้าตัด
+        unique_sections = df_raw['Section Property'].unique()
         safe_loads = {}
-        st.sidebar.subheader("Define Safe Load (tons)")
+        st.sidebar.subheader("Safe Load (tons)")
         for sec in unique_sections:
-            safe_loads[sec] = st.sidebar.number_input(f"Safe Load for {sec}", value=500.0, step=10.0)
+            safe_loads[sec] = st.sidebar.number_input(f"{sec}", value=500.0, step=10.0)
             
-        # กำหนดเกณฑ์ Ratio สำหรับสี
-        st.sidebar.subheader("Ratio Thresholds")
-        yellow_thresh = st.sidebar.slider("Yellow Threshold (Ratio > x)", 0.0, 1.5, 0.90)
-        red_thresh = st.sidebar.slider("Red Threshold (Ratio > x)", 0.0, 1.5, 1.00)
+        # กำหนดช่วงสี Ratio
+        st.sidebar.subheader("เกณฑ์การเปลี่ยนสี (Ratio)")
+        yellow_val = st.sidebar.slider("สีเหลือง เมื่อ Ratio เกิน", 0.0, 1.5, 0.90)
+        red_val = st.sidebar.slider("สีแดง เมื่อ Ratio เกิน", 0.0, 1.5, 1.00)
         
-        # --- 4. Calculation ---
-        def calculate_ratio(row):
-            s_load = safe_loads.get(row['Section Property'], 1.0)
-            ratio = row['Load_P'] / s_load
-            return ratio
-
-        df_final['Ratio'] = df_final.apply(calculate_ratio, axis=1)
+        # --- 3. คำนวณ Ratio และกำหนดสี ---
+        df_raw['Ratio'] = df_raw.apply(lambda r: r['Load_P'] / safe_loads.get(r['Section Property'], 1.0), axis=1)
         
-        def assign_color(ratio):
-            if ratio >= red_thresh: return 'Over Load (Red)'
-            elif ratio >= yellow_thresh: return 'Warning (Yellow)'
-            else: return 'Safe (Green)'
+        def get_status(r):
+            if r >= red_val: return 'Over Load (Red)'
+            elif r >= yellow_val: return 'Warning (Yellow)'
+            return 'Safe (Green)'
             
-        df_final['Status'] = df_final['Ratio'].apply(assign_color)
+        df_raw['Status'] = df_raw['Ratio'].apply(get_status)
 
-        # --- 5. Visualization ---
+        # --- 4. การพล็อตด้วย Plotly (ggplot Minimal Style) ---
+        # สีแบบ ggplot2: Soft Red, Soft Yellow, Soft Teal
         color_map = {
-            'Over Load (Red)': '#FF0000',
-            'Warning (Yellow)': '#FFD700',
-            'Safe (Green)': '#008000'
+            'Over Load (Red)': '#F8766D', 
+            'Warning (Yellow)': '#FFCC00', 
+            'Safe (Green)': '#00BFC4'
         }
         
         fig = px.scatter(
-            df_final, 
-            x="X", y="Y", 
+            df_raw, x="X", y="Y", 
             color="Status",
             symbol="Section Property",
-            text=df_final['Load_P'].round(1),
-            hover_data=['Column', 'Section Property', 'Ratio'],
+            text=df_raw['Load_P'].apply(lambda x: f"{x:.1f}"), # แสดงเลขโหลด
+            hover_data={'X':False, 'Y':False, 'Column':True, 'Ratio':':.2f'},
             color_discrete_map=color_map,
-            title="Pile Load Layout Plan"
+            category_orders={"Status": ["Safe (Green)", "Warning (Yellow)", "Over Load (Red)"]}
         )
         
-        fig.update_traces(textposition='top center', marker=dict(size=12))
+        # ปรับแต่ง Marker และ Label (ตัวเลขสีดำ)
+        fig.update_traces(
+            textposition='top center', 
+            marker=dict(size=14, line=dict(width=1, color='DarkSlateGrey')),
+            textfont=dict(family="Arial", size=11, color="black") # บังคับตัวเลขเป็นสีดำ
+        )
+        
+        # ปรับ Layout เป็นพื้นหลังขาว Minimal
         fig.update_layout(
             plot_bgcolor='white',
+            paper_bgcolor='white',
             xaxis=dict(showgrid=False, zeroline=False, title="X (m)"),
             yaxis=dict(showgrid=False, zeroline=False, title="Y (m)", scaleanchor="x", scaleratio=1),
-            height=800
+            height=800,
+            font=dict(color="black"),
+            legend_title_text='สถานะและหน้าตัดเสา'
         )
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- 6. Summary Table ---
-        st.subheader("Summary Table")
-        st.dataframe(df_final[['Column', 'Section Property', 'Load_P', 'Ratio', 'Status']].sort_values(by='Ratio', ascending=False))
+        # --- 5. ตารางสรุปด้านล่าง ---
+        st.subheader("📊 ตารางสรุปข้อมูลเสาเข็ม")
+        st.dataframe(df_raw[['Column', 'Section Property', 'Load_P', 'Ratio', 'Status']]
+                     .sort_values('Ratio', ascending=False), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
-        st.info("โปรดตรวจสอบว่าชื่อ Sheet ในไฟล์ Excel ตรงกับ: 'Element Forces - Columns', 'Column Object Connectivity', 'Point Object Connectivity', 'Frame Assigns - Sect Prop'")
+        st.error(f"เกิดข้อผิดพลาด: {e}")
+        st.info("ตรวจสอบให้แน่ใจว่าไฟล์ Excel มี Sheet ชื่อ: Element Forces - Columns, Column Object Connectivity, Point Object Connectivity, Frame Assigns - Sect Prop")
