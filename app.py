@@ -5,9 +5,9 @@ import numpy as np
 import re
 
 # 1. ตั้งค่าหน้ากระดาษ
-st.set_page_config(layout="wide", page_title="Pile Load Pro V7")
+st.set_page_config(layout="wide", page_title="Pile Load Pro V8")
 
-st.title("🏗️ Pile Load Visualization & Manual Crop")
+st.title("🏗️ Pile Load Visualization (V8 - Individual Scaling)")
 st.markdown("---")
 
 # 2. ฟังก์ชันเตรียมข้อมูล (Robust Mapping)
@@ -52,7 +52,7 @@ if uploaded_file:
         unique_sections = sorted(df_raw['Section Property'].unique())
 
         # --- Sidebar ---
-        st.sidebar.header("🎨 1. ปรับขนาดวงกลมแยกหน้าตัด")
+        st.sidebar.header("📏 1. ปรับขนาดสัญลักษณ์แยกหน้าตัด")
         custom_sizes = {}
         for sec in unique_sections:
             custom_sizes[sec] = st.sidebar.slider(f"ขนาดจุด: {sec}", 5, 100, 25)
@@ -60,33 +60,33 @@ if uploaded_file:
         font_size = st.sidebar.slider("ขนาดตัวเลขโหลด", 6, 30, 12)
 
         st.sidebar.markdown("---")
-        st.sidebar.header("✂️ 2. เลือกช่วงพิกัดที่จะ Crop")
+        st.sidebar.header("⚖️ 2. ตั้งค่า Safe Load & Ratio")
+        safe_loads = {sec: st.sidebar.number_input(f"Safe Load: {sec} (tons)", value=500.0) for sec in unique_sections}
         
-        # ตั้งค่าช่วงพิกัดสำหรับการ Crop
-        min_x, max_x = float(df_raw['X_Plot'].min()), float(df_raw['X_Plot'].max())
-        min_y, max_y = float(df_raw['Y_Plot'].min()), float(df_raw['Y_Plot'].max())
-        
-        x_range = st.sidebar.slider("เลือกช่วงแกน X (m)", min_x - 5, max_x + 5, (min_x, max_x))
-        y_range = st.sidebar.slider("เลือกช่วงแกน Y (m)", min_y - 5, max_y + 5, (min_y, max_y))
+        yellow_limit = st.sidebar.slider("เกณฑ์สีเหลือง (Ratio > )", 0.0, 1.5, 0.90)
+        red_limit = st.sidebar.slider("เกณฑ์สีแดง (Ratio > )", 0.0, 1.5, 1.00)
 
         st.sidebar.markdown("---")
-        st.sidebar.header("🖼️ 3. ตั้งค่าการบันทึกภาพ")
-        export_w = st.sidebar.number_input("ความกว้างภาพ (Pixels)", value=2500)
-        # คำนวณสัดส่วนตามช่วงที่เรา Crop
-        crop_dx = x_range[1] - x_range[0]
-        crop_dy = y_range[1] - y_range[0]
-        ratio = crop_dx / crop_dy if crop_dy != 0 else 1
-        export_h = int(export_w / ratio)
-        st.sidebar.info(f"ความสูงบันทึกอัตโนมัติ: {export_h} px")
-
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Safe Load (tons)")
-        safe_loads = {sec: st.sidebar.number_input(f"Safe: {sec}", value=500.0) for sec in unique_sections}
+        st.sidebar.header("🖼️ 3. การบันทึกภาพ (PNG Export)")
+        export_w = st.sidebar.number_input("ความกว้างภาพบันทึก (Pixels)", value=2500)
         
-        # คำนวณ Ratio
+        # คำนวณ Aspect Ratio อัตโนมัติจากพิกัดจริง
+        dx = df_raw['X_Plot'].max() - df_raw['X_Plot'].min()
+        dy = df_raw['Y_Plot'].max() - df_raw['Y_Plot'].min()
+        project_ratio = dx / dy if dy != 0 else 1
+        export_h = int(export_w / project_ratio)
+        st.sidebar.info(f"ความสูงบันทึกอัตโนมัติ (เพื่อให้พอดี): {export_h} px")
+        export_scale = st.sidebar.slider("ความคมชัด (Scale)", 1, 4, 2)
+
+        # --- Calculation ---
         df_raw['Marker_Size'] = df_raw['Section Property'].map(custom_sizes)
         df_raw['Ratio'] = df_raw['Load_P'] / df_raw['Section Property'].map(safe_loads)
-        df_raw['Status'] = df_raw['Ratio'].apply(lambda r: 'Over Load (Red)' if r >= 1.0 else ('Warning (Yellow)' if r >= 0.9 else 'Safe (Green)'))
+        
+        def assign_status(r):
+            if r >= red_limit: return 'Over Load (Red)'
+            elif r >= yellow_limit: return 'Warning (Yellow)'
+            return 'Safe (Green)'
+        df_raw['Status'] = df_raw['Ratio'].apply(assign_status)
 
         # --- Plotting ---
         color_map = {'Over Load (Red)': '#F8766D', 'Warning (Yellow)': '#FFCC00', 'Safe (Green)': '#00BFC4'}
@@ -105,34 +105,38 @@ if uploaded_file:
             textfont=dict(family="Arial Black", size=font_size, color="black")
         )
         
-        # บังคับช่วงพิกัดตามที่ User เลือก Crop
-        fig.update_xaxes(range=[x_range[0], x_range[1]], showgrid=False, zeroline=False, title="X (m)", color="black")
-        fig.update_yaxes(range=[y_range[0], y_range[1]], showgrid=False, zeroline=False, title="Y (m)", scaleanchor="x", scaleratio=1, color="black")
+        # ปรับขอบเขตให้พอดีข้อมูลที่สุด (Margin 3% เพื่อไม่ให้จุดโดนตัดขอบ)
+        margin = 0.03
+        fig.update_xaxes(range=[df_raw['X_Plot'].min() - (dx*margin), df_raw['X_Plot'].max() + (dx*margin)], 
+                         showgrid=False, zeroline=False, title="X (m)", color="black")
+        fig.update_yaxes(range=[df_raw['Y_Plot'].min() - (dy*margin), df_raw['Y_Plot'].max() + (dy*margin)], 
+                         showgrid=False, zeroline=False, title="Y (m)", scaleanchor="x", scaleratio=1, color="black")
 
         fig.update_layout(
-            plot_bgcolor='white', paper_bgcolor='white', height=900,
+            plot_bgcolor='white', paper_bgcolor='white', height=850,
             font=dict(color="black"),
             legend=dict(
-                title=dict(text='สถานะ / ขนาดเสาเข็ม', font=dict(color='black', size=14)),
+                title=dict(text='สถานะ / หน้าตัด', font=dict(color='black', size=14)),
                 font=dict(family="Arial Black", size=12, color="black"),
                 bordercolor="black", borderwidth=1
             )
         )
 
+        # Config สำหรับปุ่ม Save PNG
         config = {
             'toImageButtonOptions': {
                 'format': 'png',
-                'filename': 'Pile_Layout_Custom_Crop',
+                'filename': 'Pile_Load_Plan',
                 'height': export_h,
                 'width': export_w,
-                'scale': 2
+                'scale': export_scale
             },
             'displaylogo': False
         }
         
         st.plotly_chart(fig, use_container_width=True, config=config)
         
-        st.subheader("📊 ข้อมูลเสาเข็มทั้งหมด")
+        st.subheader(f"📊 ตารางสรุปข้อมูล (เสาเข็มทั้งหมด {len(df_raw)} ต้น)")
         st.dataframe(df_raw[['Unique Name', 'Label', 'Section Property', 'Load_P', 'Ratio', 'Status']].sort_values('Ratio', ascending=False), use_container_width=True)
 
     except Exception as e:
