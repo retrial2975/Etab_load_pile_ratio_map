@@ -32,8 +32,8 @@ def process_etabs_data(file):
     
     df_final = df_merged.merge(df_forces, left_on=['Unique Name', 'Length'], right_on=['Unique Name', 'Station'])
     
-    # ใช้ค่า Load สัมบูรณ์ (Absolute) เพราะโหลดกดเป็นลบ
-    df_final['Load_P'] = df_final['P'].abs()
+    # ใช้ค่า Load สัมบูรณ์ (Absolute) และปัดเป็นเลขจำนวนเต็ม
+    df_final['Load_P'] = df_final['P'].abs().round(0).astype(int)
     return df_final
 
 # --- ส่วน UI หลัก ---
@@ -46,19 +46,18 @@ if uploaded_file:
         # --- 3. Sidebar ตั้งค่า Safe Load และ Ratio ---
         st.sidebar.header("⚙️ ตั้งค่าเกณฑ์")
         
-        # สร้างช่องกรอก Safe Load ตามหน้าตัดที่พบในไฟล์
         unique_sections = df_raw['Section Property'].unique()
         safe_loads = {}
         st.sidebar.subheader("Safe Load (tons)")
         for sec in unique_sections:
             safe_loads[sec] = st.sidebar.number_input(f"หน้าตัด {sec}:", value=500.0, step=10.0)
             
-        # แถบเลื่อนปรับช่วงสี
         st.sidebar.subheader("เกณฑ์การแสดงสี (Ratio)")
         yellow_limit = st.sidebar.slider("เริ่มสีเหลืองที่ Ratio >", 0.0, 1.5, 0.90)
         red_limit = st.sidebar.slider("เริ่มสีแดงที่ Ratio >", 0.0, 1.5, 1.00)
         
         # --- 4. การคำนวณ Ratio ---
+        # คำนวณ Ratio (เก็บทศนิยมไว้ 2 ตำแหน่งเพื่อความแม่นยำ)
         df_raw['Ratio'] = df_raw.apply(lambda r: r['Load_P'] / safe_loads.get(r['Section Property'], 1.0), axis=1)
         
         def assign_status(r):
@@ -68,8 +67,7 @@ if uploaded_file:
             
         df_raw['Status'] = df_raw['Ratio'].apply(assign_status)
 
-        # --- 5. การพล็อต (Minimal ggplot style & Black Labels) ---
-        # สีโทน ggplot2
+        # --- 5. การพล็อต (Minimal ggplot style & No Decimal & Black Legend) ---
         color_map = {
             'Over Load (Red)': '#F8766D', 
             'Warning (Yellow)': '#FFCC00', 
@@ -80,51 +78,52 @@ if uploaded_file:
             df_raw, x="X", y="Y", 
             color="Status",
             symbol="Section Property",
-            text=df_raw['Load_P'].apply(lambda x: f"{x:.1f}"), # แสดงตัวเลขโหลด
+            text=df_raw['Load_P'], # แสดงเลขโหลด (จำนวนเต็ม)
             hover_data={'X':False, 'Y':False, 'Column':True, 'Section Property':True, 'Ratio':':.2f'},
             color_discrete_map=color_map,
             category_orders={"Status": ["Safe (Green)", "Warning (Yellow)", "Over Load (Red)"]}
         )
         
-        # ปรับแต่งตัวอักษรบนจุด (บังคับสีดำเข้ม)
+        # ปรับแต่งตัวอักษรบนจุด (สีดำเข้ม / จำนวนเต็ม)
         fig.update_traces(
             textposition='top center', 
-            marker=dict(size=14, line=dict(width=1, color='black')), # ขอบจุดสีดำ
-            textfont=dict(family="Arial Black", size=12, color="black") # ตัวเลขโหลดสีดำเข้ม
+            marker=dict(size=14, line=dict(width=1, color='black')),
+            textfont=dict(family="Arial Black", size=12, color="black")
         )
         
-        # ปรับ Layout พื้นหลังขาวและ Legend สีดำ
+        # ปรับ Layout และบังคับ Legend Title ให้เป็นสีดำ
         fig.update_layout(
             plot_bgcolor='white',
             paper_bgcolor='white',
             xaxis=dict(showgrid=False, zeroline=False, title="X (m)", color="black"),
             yaxis=dict(showgrid=False, zeroline=False, title="Y (m)", scaleanchor="x", scaleratio=1, color="black"),
             height=850,
-            font=dict(color="black"), # บังคับตัวอักษรทั้งกราฟเป็นสีดำ
+            font=dict(color="black"), # บังคับตัวอักษรทั้งกราฟ
             legend=dict(
-                font=dict(family="Arial Black", size=13, color="black"), # แถบสถานะสีดำเข้ม
+                font=dict(family="Arial Black", size=13, color="black"), 
+                title_font_color="black", # บังคับหัวข้อ Legend เป็นสีดำ
                 bgcolor="rgba(255,255,255,0.7)",
                 bordercolor="black",
                 borderwidth=1
             ),
-            legend_title_text='📌 สถานะ / ชนิดหน้าตัด'
+            legend_title_text='สถานะ / ชนิดหน้าตัด'
         )
         
         # แสดงกราฟ
         st.plotly_chart(fig, use_container_width=True)
         
         # --- 6. ตารางสรุปผล ---
-        st.subheader("📊 ตารางสรุปข้อมูลเสาเข็ม (เรียงตาม Load มากไปน้อย)")
+        st.subheader("📊 ตารางสรุปข้อมูลเสาเข็ม")
         st.dataframe(
             df_raw[['Column', 'Section Property', 'Load_P', 'Ratio', 'Status']]
             .sort_values(by='Ratio', ascending=False)
-            .style.format({'Load_P': '{:.2f}', 'Ratio': '{:.2f}'}),
+            .style.format({'Load_P': '{:,.0f}', 'Ratio': '{:.2f}'}), # ตารางแสดง Load เป็นเลขจำนวนเต็ม
             use_container_width=True
         )
 
     except Exception as e:
-        st.error(f"❌ เกิดข้อผิดพลาดในการประมวลผล: {e}")
-        st.info("คำแนะนำ: ตรวจสอบว่าในไฟล์ Excel มี Sheet ครบทั้ง 4 ชื่อตามที่ระบุไว้ในเงื่อนไขตอนต้น")
+        st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+        st.info("ตรวจสอบชื่อ Sheet: Element Forces - Columns, Column Object Connectivity, Point Object Connectivity, Frame Assigns - Sect Prop")
 
 else:
     st.info("☝️ กรุณาอัปโหลดไฟล์ Excel เพื่อเริ่มต้น")
