@@ -4,11 +4,13 @@ import plotly.express as px
 import numpy as np
 import re
 
-st.set_page_config(layout="wide", page_title="Pile Load Envelope V10")
+# 1. ตั้งค่าหน้ากระดาษ
+st.set_page_config(layout="wide", page_title="Pile Load Multi-Select V11")
 
-st.title("🏗️ Pile Load Dashboard (Critical Envelope Mode)")
-st.info("💡 หลักการ: โปรแกรมจะเลือกแสดง Case ที่มี Ratio (Load/Capacity) สูงที่สุดของเสาแต่ละต้นมาแสดง เพื่อความปลอดภัยสูงสุด")
+st.title("🏗️ Pile Load Dashboard (Multi-Select & Custom Envelope)")
+st.markdown("---")
 
+# 2. ฟังก์ชันเตรียมข้อมูล
 @st.cache_data
 def process_etabs_data(file):
     df_forces = pd.read_excel(file, sheet_name="Element Forces - Columns", skiprows=[0, 2])
@@ -21,7 +23,7 @@ def process_etabs_data(file):
         if 'Unique Name' in df.columns: df['Unique Name'] = pd.to_numeric(df['Unique Name'], errors='coerce')
         if 'UniqueName' in df.columns: df['UniqueName'] = pd.to_numeric(df['UniqueName'], errors='coerce')
 
-    # เชื่อมพิกัด
+    # เชื่อมพิกัด X, Y
     df_m = df_sect[['UniqueName', 'Section Property', 'Label']].rename(columns={'UniqueName': 'Unique Name'})
     df_m = df_m.merge(df_conn[['Unique Name', 'UniquePtI', 'UniquePtJ']], on='Unique Name', how='left')
     df_m = df_m.merge(df_points[['UniqueName', 'X', 'Y', 'Z']], left_on='UniquePtJ', right_on='UniqueName', how='left').rename(columns={'X':'X_J', 'Y':'Y_J', 'Z':'Z_J'}).drop(columns='UniqueName')
@@ -33,13 +35,13 @@ def process_etabs_data(file):
     df_m.loc[mask_both, 'X_Plot'] = np.where(df_m.loc[mask_both, 'Z_J'] >= df_m.loc[mask_both, 'Z_I'], df_m.loc[mask_both, 'X_J'], df_m.loc[mask_both, 'X_I'])
     df_m.loc[mask_both, 'Y_Plot'] = np.where(df_m.loc[mask_both, 'Z_J'] >= df_m.loc[mask_both, 'Z_I'], df_m.loc[mask_both, 'Y_J'], df_m.loc[mask_both, 'Y_I'])
 
-    # เตรียมแรง P ทุกเคส
+    # เตรียมแรง P ทุกเคส (Station หัวเสา)
     df_forces['P'] = pd.to_numeric(df_forces['P'], errors='coerce')
-    # ดึงค่าแรงที่หัวเสา (Station ต้นทาง)
     df_forces_top = df_forces.sort_values(['Unique Name', 'Output Case', 'Station']).groupby(['Unique Name', 'Output Case']).head(1)
     
     return df_m.dropna(subset=['X_Plot']), df_forces_top
 
+# --- UI Logic ---
 uploaded_file = st.file_uploader("📂 อัปโหลดไฟล์ Excel (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
@@ -49,8 +51,19 @@ if uploaded_file:
         all_cases = sorted(df_all_forces['Output Case'].unique())
 
         # --- Sidebar ---
-        st.sidebar.header("📊 1. การเลือกเคสและโหมด")
-        selected_case = st.sidebar.selectbox("เลือก Load Combination", ["Envelope (MAX Ratio)"] + all_cases)
+        st.sidebar.header("📊 1. เลือก Combinations")
+        
+        # ปุ่ม Select All
+        select_all = st.sidebar.checkbox("เลือกทั้งหมด (Select All Cases)")
+        if select_all:
+            selected_cases = st.sidebar.multiselect("เลือก Load Combinations", all_cases, default=all_cases)
+        else:
+            selected_cases = st.sidebar.multiselect("เลือก Load Combinations", all_cases, default=[all_cases[0]] if all_cases else [])
+
+        if not selected_cases:
+            st.warning("⚠️ กรุณาเลือกอย่างน้อย 1 Load Combination ในแถบด้านข้าง")
+            st.stop()
+
         display_mode = st.sidebar.radio("แสดงผลบนแผนที่", ["Load (P)", "Ratio (2 decimal)"])
 
         st.sidebar.markdown("---")
@@ -66,11 +79,14 @@ if uploaded_file:
 
         st.sidebar.markdown("---")
         st.sidebar.header("🎨 3. Visual Settings")
-        dot_sizes = {sec: st.sidebar.slider(f"ขนาด: {sec}", 5, 80, 20) for sec in unique_sections}
-        font_size = st.sidebar.slider("ขนาดตัวเลข", 6, 25, 11)
+        dot_sizes = {sec: st.sidebar.slider(f"ขนาดจุด: {sec}", 5, 80, 20) for sec in unique_sections}
+        font_size = st.sidebar.slider("ขนาดฟอนต์บน Map", 6, 25, 11)
 
         # --- Logic: Calculation ---
         df_merged = df_all_forces.merge(df_base[['Unique Name', 'Section Property', 'X_Plot', 'Y_Plot', 'Label']], on='Unique Name')
+        
+        # กรองเฉพาะเคสที่เลือก
+        df_filtered = df_merged[df_merged['Output Case'].isin(selected_cases)].copy()
         
         def do_calc(row):
             is_t = row['P'] > 0
@@ -78,16 +94,12 @@ if uploaded_file:
             ratio = abs(row['P']) / (limit if limit != 0 else 1)
             return pd.Series([ratio, is_t])
 
-        df_merged[['Ratio', 'Is_Tension']] = df_merged.apply(do_calc, axis=1)
+        df_filtered[['Ratio', 'Is_Tension']] = df_filtered.apply(do_calc, axis=1)
 
-        # การเลือกเคส
-        if selected_case == "Envelope (MAX Ratio)":
-            # หัวใจ: เลือกแถวที่ Ratio สูงสุดของเสาแต่ละต้น
-            df_final = df_merged.sort_values('Ratio').groupby('Unique Name').tail(1).copy()
-        else:
-            df_final = df_merged[df_merged['Output Case'] == selected_case].copy()
+        # หาค่าวิกฤตที่สุด (Envelope) ของกลุ่มที่เลือก
+        df_final = df_filtered.sort_values('Ratio').groupby('Unique Name').tail(1).copy()
 
-        # สร้าง Label สำหรับแสดงบน Map
+        # สร้าง Label สำหรับแผนที่
         if "Ratio" in display_mode:
             df_final['Map_Label'] = df_final.apply(lambda r: f"{r['Ratio']:.2f}{' (T)' if r['Is_Tension'] else ''}", axis=1)
         else:
@@ -109,7 +121,6 @@ if uploaded_file:
         
         fig.update_traces(
             mode='markers+text',
-            # ใส่ขอบหนา 3 ถ้าเป็นแรงดึง และใส่เส้นประ/ทึบ (ถ้าต้องการ)
             marker=dict(symbol='circle', line=dict(width=df_final['Is_Tension'].map({True:3, False:1}), color='black')),
             textposition='top center', 
             textfont=dict(family="Arial Black", size=font_size, color="black")
@@ -124,8 +135,7 @@ if uploaded_file:
 
         st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'height': 1500, 'width': 2500, 'scale': 2}})
         
-        st.subheader(f"📊 ตารางสรุป: {selected_case}")
-        # เพิ่มคอลัมน์ Type เพื่อให้ดูง่ายในตาราง
+        st.subheader(f"📊 ตารางสรุป: วิกฤตที่สุดจาก {len(selected_cases)} Combinations ที่เลือก")
         df_final['Type'] = df_final['Is_Tension'].map({True: 'Tension (ดึง)', False: 'Compression (อัด)'})
         st.dataframe(df_final[['Label', 'Section Property', 'Type', 'Output Case', 'P', 'Ratio', 'Status']].sort_values('Ratio', ascending=False), use_container_width=True)
 
